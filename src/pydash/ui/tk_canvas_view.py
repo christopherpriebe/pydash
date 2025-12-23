@@ -10,35 +10,27 @@ class TkCanvasView:
         self.canvas = tk.Canvas(root, width=width, height=height, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
-        # Ground (persistent)
-        self._ground_id = self.canvas.create_rectangle(
-            0, 0, width, 0, outline="", fill="#444"
-        )
-
-        # Player (persistent)
-        self._player_id = self.canvas.create_rectangle(
-            0, 0, 0, 0, outline="", fill="#66f"
-        )
-
-        # Debug text (optional)
-        self._text_id = self.canvas.create_text(
-            10, 10, anchor="nw", text="", font=("TkDefaultFont", 12)
-        )
+        self._ground_id = self.canvas.create_rectangle(0, 0, width, 0, outline="", fill="#444")
+        self._player_id = self.canvas.create_rectangle(0, 0, 0, 0, outline="", fill="#66f")
+        self._text_id = self.canvas.create_text(10, 10, anchor="nw", text="", font=("TkDefaultFont", 12))
 
     def render_game(self, state: GameState) -> None:
-        # Ground rectangle from ground_y to bottom
         gy = state.ground_y
         self.canvas.coords(self._ground_id, 0, gy, self._w, self._h)
 
-        # Player as axis-aligned square
         p = state.player
-        x1 = p.x
-        y1 = p.y
-        x2 = p.x + p.size
-        y2 = p.y + p.size
-        self.canvas.coords(self._player_id, x1, y1, x2, y2)
+        self.canvas.coords(self._player_id, p.x, p.y, p.x + p.size, p.y + p.size)
+
+        # Redraw spikes (simple + fine for now)
+        self.canvas.delete("spike")
+        for s in state.spikes:
+            # Triangle spike in a cell: base on ground, apex up.
+            x1, y1 = s.x, s.y + s.size
+            x2, y2 = s.x + s.size, s.y + s.size
+            x3, y3 = s.x + s.size / 2.0, s.y
+            self.canvas.create_polygon(x1, y1, x2, y2, x3, y3, fill="#f44", outline="", tags=("spike",))
 
         self.canvas.itemconfigure(
             self._text_id,
-            text=f"y={p.y:.1f} vy={p.vy:.1f} on_ground={p.on_ground}",
+            text=f"spikes={len(state.spikes)} y={p.y:.1f} vy={p.vy:.1f}",
         )

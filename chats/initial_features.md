@@ -463,3 +463,327 @@ Once you see the jump:
 	•	Domain collision: AABB against spike rectangles; on hit, transition to Dead/reset state.
 
 If you want, paste your current folder tree and I’ll suggest the cleanest exact placement for PlayScene + SceneManager so you don’t have to refactor twice.
+
+# Prompt
+Now, can we add spikes to the game that will cause the player to restart? And, for the time being, let's just randomly generate them using an exponential distribution based on time (i.e., the longer without a spike, the higher chance to spawn one). Like geometry dash, I want the spikes to currently only be able to be placed on a grid where each spike is the size of one cell.
+
+# Response
+Yep. The clean way to do this (and keep it testable + layered) is:
+	•	Domain owns: spike entities, scrolling, spawn timer, collision, and a typed death signal.
+	•	App owns: RNG injection + “restart on death”.
+	•	UI owns: drawing spikes (grid-cell sized) and nothing else.
+
+Below is a minimal vertical slice that works with your current “player jumps in place” setup by adding auto-scroll (spikes move toward the player), Poisson/exponential spawns, grid alignment, and restart on hit.
+
+⸻
+
+1) Domain: add spikes + RNG interface + death exception
+
+pydash/domain/exceptions.py
+
+```python
+class PlayerDied(Exception):
+    """Raised by the domain when the player hits a hazard and must restart."""
+```
+
+pydash/domain/rng.py
+
+```python
+from __future__ import annotations
+from typing import Protocol
+
+
+class RandomSource(Protocol):
+    def random(self) -> float:  # returns in [0.0, 1.0)
+        ...
+```
+
+Update pydash/domain/game_state.py
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Spike:
+    x: float
+    y: float
+    size: float  # one grid cell
+
+
+@dataclass(frozen=True)
+class Player:
+    x: float
+    y: float
+    vy: float
+    size: float
+    on_ground: bool
+
+
+@dataclass(frozen=True)
+class GameState:
+    player: Player
+    ground_y: float
+    gravity: float
+    jump_velocity: float
+
+    # Scrolling / grid
+    scroll_speed: float       # px/s (spikes move left)
+    cell_size: float          # grid cell size
+    spawn_x: float            # world x where new spikes appear (right side)
+    despawn_x: float          # world x where spikes are removed (left side)
+
+    # Spikes + spawner state
+    spikes: tuple[Spike, ...]
+    time_to_next_spike: float  # seconds until next spawn
+    spike_rate: float          # lambda (spikes per second)
+```
+
+Update pydash/domain/world.py
+
+```python
+from __future__ import annotations
+
+import math
+
+from pydash.domain.exceptions import PlayerDied
+from pydash.domain.game_state import GameState, Player, Spike
+from pydash.domain.input_state import InputState
+from pydash.domain.rng import RandomSource
+
+
+class World:
+    def step(self, state: GameState, inp: InputState, dt: float, rng: RandomSource) -> GameState:
+        # ----- Player jump + vertical physics -----
+        p = state.player
+        if inp.jump_pressed and p.on_ground:
+            p = Player(x=p.x, y=p.y, vy=state.jump_velocity, size=p.size, on_ground=False)
+
+        vy = p.vy + state.gravity * dt
+        y = p.y + vy * dt
+
+        ground_top = state.ground_y - p.size
+        if y >= ground_top:
+            y = ground_top
+            vy = 0.0
+            on_ground = True
+        else:
+            on_ground = False
+
+        p2 = Player(x=p.x, y=y, vy=vy, size=p.size, on_ground=on_ground)
+
+        # ----- Move spikes left (auto-scroll) -----
+        dx = state.scroll_speed * dt
+        moved = tuple(Spike(x=s.x - dx, y=s.y, size=s.size) for s in state.spikes)
+
+        # Despawn spikes that are far left
+        kept = tuple(s for s in moved if (s.x + s.size) >= state.despawn_x)
+
+        # ----- Exponential/Poisson spawner -----
+        t = state.time_to_next_spike - dt
+        spikes = kept
+        if t <= 0.0:
+            spikes = spikes + (self._spawn_spike(state),)
+            t = self._sample_exponential(state.spike_rate, rng)
+
+        # ----- Collision: AABB vs cell-sized spike -----
+        if self._player_hits_any_spike(p2, spikes):
+            raise PlayerDied()
+
+        return GameState(
+            player=p2,
+            ground_y=state.ground_y,
+            gravity=state.gravity,
+            jump_velocity=state.jump_velocity,
+            scroll_speed=state.scroll_speed,
+            cell_size=state.cell_size,
+            spawn_x=state.spawn_x,
+            despawn_x=state.despawn_x,
+            spikes=spikes,
+            time_to_next_spike=t,
+            spike_rate=state.spike_rate,
+        )
+
+    def _spawn_spike(self, state: GameState) -> Spike:
+        # Grid-aligned, on the ground, 1 cell wide/tall.
+        size = state.cell_size
+        y = state.ground_y - size
+
+        # Align spawn_x to the grid:
+        x = self._align_to_grid(state.spawn_x, size)
+        return Spike(x=x, y=y, size=size)
+
+    def _align_to_grid(self, x: float, cell: float) -> float:
+        return math.ceil(x / cell) * cell
+
+    def _sample_exponential(self, rate: float, rng: RandomSource) -> float:
+        # Inter-arrival time ~ Exp(rate). (Poisson process)
+        if rate <= 0.0:
+            return 10**9  # effectively "never"
+        u = rng.random()
+        # avoid log(0)
+        u = max(1e-12, min(1.0 - 1e-12, u))
+        return -math.log(1.0 - u) / rate
+
+    def _player_hits_any_spike(self, p: Player, spikes: tuple[Spike, ...]) -> bool:
+        px1, py1 = p.x, p.y
+        px2, py2 = p.x + p.size, p.y + p.size
+        for s in spikes:
+            sx1, sy1 = s.x, s.y
+            sx2, sy2 = s.x + s.size, s.y + s.size
+            if (px1 < sx2 and px2 > sx1 and py1 < sy2 and py2 > sy1):
+                return True
+        return False
+```
+
+⸻
+
+2) App: inject RNG + restart on death
+
+Update pydash/app/game_app.py:
+
+```python
+import random
+import tkinter as tk
+
+from pydash.app.game_loop import GameLoop
+from pydash.domain.exceptions import PlayerDied
+from pydash.domain.game_state import GameState, Player
+from pydash.domain.world import World
+from pydash.ui.input_mapper import TkInputMapper
+from pydash.ui.tk_canvas_view import TkCanvasView
+
+
+class GameApp:
+    def __init__(self) -> None:
+        self.root = tk.Tk()
+        self.root.title("GD Clone (Skeleton)")
+
+        self.view = TkCanvasView(self.root, width=800, height=450)
+        self.input = TkInputMapper(self.root)
+
+        self.world = World()
+        self.rng = random.Random()  # injected randomness
+
+        self._fixed_dt = 1.0 / 120.0
+        self._accum = 0.0
+
+        self.state = self._new_run_state()
+
+        self.loop = GameLoop(
+            root=self.root,
+            render_fn=self._render,
+            update_fn=self._update,
+            fps=60,
+        )
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _new_run_state(self) -> GameState:
+        cell = 32.0
+        return GameState(
+            player=Player(x=120.0, y=0.0, vy=0.0, size=cell, on_ground=False),
+            ground_y=380.0,
+            gravity=2000.0,
+            jump_velocity=-700.0,
+
+            scroll_speed=260.0,   # tune
+            cell_size=cell,
+            spawn_x=820.0,        # just beyond the right edge
+            despawn_x=-100.0,     # off the left side
+
+            spikes=tuple(),
+            time_to_next_spike=0.5,  # first one soon-ish
+            spike_rate=0.35,         # average ~0.35 spikes/sec (tune)
+        )
+
+    def run(self) -> None:
+        self.loop.start()
+        self.root.mainloop()
+
+    def _update(self, dt: float) -> None:
+        self._accum += dt
+        inp = self.input.sample()
+
+        max_steps = 5
+        steps = 0
+        while self._accum >= self._fixed_dt and steps < max_steps:
+            try:
+                self.state = self.world.step(self.state, inp, self._fixed_dt, self.rng)
+            except PlayerDied:
+                self.state = self._new_run_state()
+                self._accum = 0.0
+                break
+
+            self._accum -= self._fixed_dt
+            steps += 1
+            inp = type(inp)(jump_pressed=False)
+
+    def _render(self) -> None:
+        self.view.render_game(self.state)
+
+    def _on_close(self) -> None:
+        self.loop.stop()
+        self.root.destroy()
+```
+
+⸻
+
+3) UI: draw spikes (grid cells)
+
+Update pydash/ui/tk_canvas_view.py (keep your ground/player code; add spike drawing). Easiest: clear and redraw spikes each frame under a tag.
+
+```python
+import tkinter as tk
+from pydash.domain.game_state import GameState
+
+
+class TkCanvasView:
+    def __init__(self, root: tk.Tk, *, width: int, height: int) -> None:
+        self._w = width
+        self._h = height
+
+        self.canvas = tk.Canvas(root, width=width, height=height, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        self._ground_id = self.canvas.create_rectangle(0, 0, width, 0, outline="", fill="#444")
+        self._player_id = self.canvas.create_rectangle(0, 0, 0, 0, outline="", fill="#66f")
+        self._text_id = self.canvas.create_text(10, 10, anchor="nw", text="", font=("TkDefaultFont", 12))
+
+    def render_game(self, state: GameState) -> None:
+        gy = state.ground_y
+        self.canvas.coords(self._ground_id, 0, gy, self._w, self._h)
+
+        p = state.player
+        self.canvas.coords(self._player_id, p.x, p.y, p.x + p.size, p.y + p.size)
+
+        # Redraw spikes (simple + fine for now)
+        self.canvas.delete("spike")
+        for s in state.spikes:
+            # Triangle spike in a cell: base on ground, apex up.
+            x1, y1 = s.x, s.y + s.size
+            x2, y2 = s.x + s.size, s.y + s.size
+            x3, y3 = s.x + s.size / 2.0, s.y
+            self.canvas.create_polygon(x1, y1, x2, y2, x3, y3, fill="#f44", outline="", tags=("spike",))
+
+        self.canvas.itemconfigure(
+            self._text_id,
+            text=f"spikes={len(state.spikes)} y={p.y:.1f} vy={p.vy:.1f}",
+        )
+```
+
+⸻
+
+Result
+	•	Spikes appear on a grid (cell size = player size).
+	•	Spikes move left toward the player at scroll_speed.
+	•	Spawns follow an exponential inter-arrival time (the longer since last spike, the more likely one spawns soon).
+	•	If the player touches a spike, the domain raises PlayerDied and the app restarts by resetting GameState.
+
+If you want the spawn to feel more “GD-like” next, the very next tweak is: spawn in patterns (e.g., sometimes 2–4 cells apart, sometimes a small cluster) while still keeping exponential “gaps” between groups.
+
+# Prompt
+I think the next step is to create the idea of a "level". That means there is a fixed length level with a certain number of cells. For now, let's restrict the length to always be 50 cells. A level is randomly generated with spikes and then the player tries to play the level. If they win, a new level is generated and they play that.
+
+# Response
