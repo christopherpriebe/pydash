@@ -564,5 +564,5 @@ Tkinter-specific “Geometry Dash clone” constraints (worth knowing up front)
 If you want, I can also drop in a clean collision module (AABB + triangle-ish spikes approximation), and a level format (JSON with block types + timings) that’s friendly for an editor later—both fit neatly into the structure above.
 
 # Notes
-Running the command `python3 -m pydash.main` does not work given this setup.
+This looks alright, but I am hoping to build something a bit more robust.
 I will prompt ChatGPT to design a more solid software architecture in a separate chat.
