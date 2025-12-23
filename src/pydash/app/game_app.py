@@ -6,6 +6,8 @@ from pydash.domain.exceptions import LevelCompleted, PlayerDied
 from pydash.domain.game_state import GameState, Player, Spike
 from pydash.domain.level import Level, generate_level
 from pydash.domain.world import World
+from pydash.infra.level_repository import LevelRepository
+from pydash.infra.exceptions import LevelSaveError
 from pydash.ui.input_mapper import TkInputMapper
 from pydash.ui.tk_canvas_view import TkCanvasView
 
@@ -13,13 +15,16 @@ from pydash.ui.tk_canvas_view import TkCanvasView
 class GameApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
-        self.root.title("GD Clone (Level Slice)")
+        self.root.title("GD Clone (Level + Saving)")
 
         self.view = TkCanvasView(self.root, width=800, height=450)
         self.input = TkInputMapper(self.root)
 
         self.world = World()
         self.rng = random.Random()
+        self.level_repo = LevelRepository()
+
+        self.levels_beaten = 0
 
         self._fixed_dt = 1.0 / 120.0
         self._accum = 0.0
@@ -38,13 +43,10 @@ class GameApp:
     def _state_from_level(self, level: Level) -> GameState:
         cell = 32.0
         ground_y = 380.0
-
         player = Player(x=120.0, y=0.0, vy=0.0, size=cell, on_ground=False)
 
-        # Put the start of the level just off-screen to the right.
         level_start_x = 820.0
 
-        # Build spike instances in world coords aligned to the grid.
         spikes: list[Spike] = []
         for i in level.spike_cells:
             x = level_start_x + i * cell
@@ -83,7 +85,15 @@ class GameApp:
                 self._accum = 0.0
                 break
             except LevelCompleted:
-                # New level
+                # Save beaten level, then advance to a new one
+                self.levels_beaten += 1
+                try:
+                    self.level_repo.save_beaten_level(self.state.level, self.levels_beaten)
+                except LevelSaveError:
+                    # For now: fail fast (matches your current loop behavior philosophy).
+                    # Later: show dialog + continue.
+                    raise
+
                 self.level = generate_level(self.rng, length_cells=50)
                 self.state = self._state_from_level(self.level)
                 self._accum = 0.0

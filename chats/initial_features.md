@@ -1087,3 +1087,306 @@ What this gets you
 ⸻
 
 If you want the next incremental improvement after this: instead of storing spikes as moved world-rectangles, keep spike cells in Level as the source of truth and compute world x from level_scrolled (so resetting doesn’t rebuild lists). That’s a small refactor once this slice is working.
+
+# Prompt
+Let's add a format for storing the levels. For each level beaten, save that level in the working directory.
+
+# Response
+Great — this is an Infrastructure concern: define a versioned JSON format, validate it on write/read, and have the App call “save level” at the level boundary (when LevelCompleted is caught).
+
+Below is a clean, minimal implementation.
+
+⸻
+
+1) Level file format (versioned JSON)
+
+Example file:
+
+```json
+{
+  "format": "pydash.level",
+  "version": 1,
+  "length_cells": 50,
+  "spike_cells": [4, 9, 12, 25]
+}
+```
+
+Rules (v1):
+	•	format must be "pydash.level"
+	•	version must be 1
+	•	length_cells must be 50 (for now)
+	•	spike_cells is a list of unique integers in [0, length_cells-1]
+
+⸻
+
+2) Add typed exceptions (Domain or Infra—either is fine; I’ll put in infra)
+
+pydash/infra/exceptions.py
+
+```python
+class LevelEncodeError(Exception):
+    pass
+
+
+class LevelDecodeError(Exception):
+    pass
+
+
+class LevelSaveError(Exception):
+    pass
+```
+
+⸻
+
+3) Infra: codec + repository (JSON + atomic write)
+
+pydash/infra/level_codec.py
+
+```python
+from __future__ import annotations
+
+from pydash.domain.level import Level
+from pydash.infra.exceptions import LevelDecodeError, LevelEncodeError
+
+
+_FORMAT = "pydash.level"
+_VERSION = 1
+
+
+def encode_level(level: Level) -> dict:
+    try:
+        return {
+            "format": _FORMAT,
+            "version": _VERSION,
+            "length_cells": int(level.length_cells),
+            "spike_cells": list(level.spike_cells),
+        }
+    except Exception as e:
+        raise LevelEncodeError(f"Failed to encode level: {e}") from e
+
+
+def decode_level(obj: dict) -> Level:
+    try:
+        if obj.get("format") != _FORMAT:
+            raise LevelDecodeError("Invalid level format marker.")
+        if obj.get("version") != _VERSION:
+            raise LevelDecodeError("Unsupported level version.")
+
+        length_cells = int(obj["length_cells"])
+        if length_cells != 50:
+            raise LevelDecodeError("length_cells must be 50 for now.")
+
+        spike_cells_raw = obj.get("spike_cells", [])
+        if not isinstance(spike_cells_raw, list):
+            raise LevelDecodeError("spike_cells must be a list.")
+
+        spike_cells: list[int] = []
+        seen: set[int] = set()
+        for x in spike_cells_raw:
+            if not isinstance(x, int):
+                raise LevelDecodeError("spike_cells entries must be integers.")
+            if x < 0 or x >= length_cells:
+                raise LevelDecodeError("spike_cells entry out of range.")
+            if x in seen:
+                raise LevelDecodeError("spike_cells must not contain duplicates.")
+            seen.add(x)
+            spike_cells.append(x)
+
+        return Level(length_cells=length_cells, spike_cells=tuple(spike_cells))
+    except LevelDecodeError:
+        raise
+    except Exception as e:
+        raise LevelDecodeError(f"Failed to decode level: {e}") from e
+```
+
+pydash/infra/level_repository.py
+
+```python
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from pydash.domain.level import Level
+from pydash.infra.exceptions import LevelSaveError
+from pydash.infra.level_codec import encode_level
+
+
+@dataclass(frozen=True)
+class SaveResult:
+    path: Path
+
+
+class LevelRepository:
+    """
+    Saves levels into a directory under the current working directory.
+    """
+
+    def __init__(self, *, base_dir: Path | None = None) -> None:
+        self._base_dir = base_dir or Path.cwd()
+        self._levels_dir = self._base_dir / "levels"
+        self._levels_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_beaten_level(self, level: Level, beaten_index: int) -> SaveResult:
+        """
+        beaten_index: 1-based count of levels beaten so far (used for stable filenames).
+        """
+        filename = f"level_{beaten_index:04d}_v1.json"
+        final_path = self._levels_dir / filename
+        tmp_path = self._levels_dir / (filename + ".tmp")
+
+        try:
+            payload = encode_level(level)
+            data = json.dumps(payload, indent=2, sort_keys=True)
+
+            # Atomic-ish write: write temp then replace.
+            tmp_path.write_text(data, encoding="utf-8")
+            os.replace(tmp_path, final_path)
+
+            return SaveResult(path=final_path)
+        except Exception as e:
+            # best-effort cleanup
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise LevelSaveError(f"Failed to save level to {final_path}: {e}") from e
+```
+
+This writes to ./levels/level_0001_v1.json, ./levels/level_0002_v1.json, etc.
+
+⸻
+
+4) App: save on “level beaten” boundary
+
+Update pydash/app/game_app.py:
+	•	Inject the repository.
+	•	Track levels_beaten.
+	•	On LevelCompleted, save the level that was just beaten, then generate the next.
+
+```python
+import random
+import tkinter as tk
+
+from pydash.app.game_loop import GameLoop
+from pydash.domain.exceptions import LevelCompleted, PlayerDied
+from pydash.domain.game_state import GameState, Player, Spike
+from pydash.domain.level import Level, generate_level
+from pydash.domain.world import World
+from pydash.infra.level_repository import LevelRepository
+from pydash.infra.exceptions import LevelSaveError
+from pydash.ui.input_mapper import TkInputMapper
+from pydash.ui.tk_canvas_view import TkCanvasView
+
+
+class GameApp:
+    def __init__(self) -> None:
+        self.root = tk.Tk()
+        self.root.title("GD Clone (Level + Saving)")
+
+        self.view = TkCanvasView(self.root, width=800, height=450)
+        self.input = TkInputMapper(self.root)
+
+        self.world = World()
+        self.rng = random.Random()
+        self.level_repo = LevelRepository()
+
+        self.levels_beaten = 0
+
+        self._fixed_dt = 1.0 / 120.0
+        self._accum = 0.0
+
+        self.level = generate_level(self.rng, length_cells=50)
+        self.state = self._state_from_level(self.level)
+
+        self.loop = GameLoop(
+            root=self.root,
+            render_fn=self._render,
+            update_fn=self._update,
+            fps=60,
+        )
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _state_from_level(self, level: Level) -> GameState:
+        cell = 32.0
+        ground_y = 380.0
+        player = Player(x=120.0, y=0.0, vy=0.0, size=cell, on_ground=False)
+
+        level_start_x = 820.0
+
+        spikes: list[Spike] = []
+        for i in level.spike_cells:
+            x = level_start_x + i * cell
+            y = ground_y - cell
+            spikes.append(Spike(x=x, y=y, size=cell))
+
+        return GameState(
+            player=player,
+            ground_y=ground_y,
+            gravity=2000.0,
+            jump_velocity=-700.0,
+            scroll_speed=260.0,
+            cell_size=cell,
+            level=level,
+            level_start_x=level_start_x,
+            level_scrolled=0.0,
+            spikes=tuple(spikes),
+        )
+
+    def run(self) -> None:
+        self.loop.start()
+        self.root.mainloop()
+
+    def _update(self, dt: float) -> None:
+        self._accum += dt
+        inp = self.input.sample()
+
+        max_steps = 5
+        steps = 0
+        while self._accum >= self._fixed_dt and steps < max_steps:
+            try:
+                self.state = self.world.step(self.state, inp, self._fixed_dt)
+            except PlayerDied:
+                # Restart SAME level
+                self.state = self._state_from_level(self.state.level)
+                self._accum = 0.0
+                break
+            except LevelCompleted:
+                # Save beaten level, then advance to a new one
+                self.levels_beaten += 1
+                try:
+                    self.level_repo.save_beaten_level(self.state.level, self.levels_beaten)
+                except LevelSaveError:
+                    # For now: fail fast (matches your current loop behavior philosophy).
+                    # Later: show dialog + continue.
+                    raise
+
+                self.level = generate_level(self.rng, length_cells=50)
+                self.state = self._state_from_level(self.level)
+                self._accum = 0.0
+                break
+
+            self._accum -= self._fixed_dt
+            steps += 1
+            inp = type(inp)(jump_pressed=False)
+
+    def _render(self) -> None:
+        self.view.render_game(self.state)
+
+    def _on_close(self) -> None:
+        self.loop.stop()
+        self.root.destroy()
+```
+
+Now, each time you beat a level, it’s saved into a levels/ folder in the current working directory (i.e., wherever you launched python -m pydash.main from).
+
+⸻
+
+Small recommended next tweak (optional but nice)
+
+Add the current level number + beaten count to your debug overlay (UI layer), so you can see it increment when the new level loads.
+
+If you want, next we can add load + replay (e.g., keep a “Level Select” menu later) using the same codec + repository with decode_level(...).
