@@ -97,7 +97,7 @@ requires-python = ">=3.10"
 
 This lets you run:
 
-```
+```bash
 python -m my_game.main
 ```
 
@@ -547,7 +547,7 @@ def test_imports():
 
 Run it:
 
-```
+```bash
 python -m tkdash.main
 ```
 
