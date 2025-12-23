@@ -1,0 +1,5 @@
+[project]
+name = "pydash"
+version = "0.0.0"
+description = "A Geometry Dash clone in Python."
+requires-python = ">=3.12"
