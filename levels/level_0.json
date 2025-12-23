@@ -1,0 +1,56 @@
+{
+  "format": "pydash.level",
+  "height_cells": 14,
+  "length_cells": 50,
+  "objects": [
+    {
+      "h": 1,
+      "kind": "spike",
+      "props": {},
+      "w": 1,
+      "x": 4,
+      "y": 13
+    },
+    {
+      "h": 1,
+      "kind": "spike",
+      "props": {},
+      "w": 1,
+      "x": 12,
+      "y": 13
+    },
+    {
+      "h": 1,
+      "kind": "spike",
+      "props": {},
+      "w": 1,
+      "x": 26,
+      "y": 13
+    },
+    {
+      "h": 1,
+      "kind": "spike",
+      "props": {},
+      "w": 1,
+      "x": 31,
+      "y": 13
+    },
+    {
+      "h": 1,
+      "kind": "spike",
+      "props": {},
+      "w": 1,
+      "x": 37,
+      "y": 13
+    },
+    {
+      "h": 1,
+      "kind": "solid",
+      "props": {},
+      "w": 2,
+      "x": 8,
+      "y": 11
+    }
+  ],
+  "version": 1
+}

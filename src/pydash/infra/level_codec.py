@@ -8,7 +8,7 @@ from pydash.infra.exceptions import LevelDecodeError, LevelEncodeError
 
 
 _FORMAT = "pydash.level"
-_VERSION_LATEST = 2
+_VERSION_LATEST = 1
 
 
 def encode_level(level: Level) -> dict:
@@ -42,9 +42,6 @@ def decode_level(obj: dict) -> Level:
         ver = obj.get("version")
         if ver == 1:
             return _decode_v1(obj)
-        if ver == 2:
-            return _decode_v2(obj)
-
         raise LevelDecodeError("Unsupported level version.")
     except LevelDecodeError:
         raise
@@ -52,7 +49,7 @@ def decode_level(obj: dict) -> Level:
         raise LevelDecodeError(f"Failed to decode level: {e}") from e
 
 
-def _decode_v2(obj: dict) -> Level:
+def _decode_v1(obj: dict) -> Level:
     length_cells = int(obj["length_cells"])
     if length_cells != 50:
         raise LevelDecodeError("length_cells must be 50 for now.")
@@ -98,20 +95,3 @@ def _decode_v2(obj: dict) -> Level:
         parsed.append(LevelObject(kind=kind, x=x, y=y, w=w, h=h, props=props))
 
     return Level(length_cells=length_cells, height_cells=height_cells, objects=tuple(parsed))
-
-
-def _decode_v1(obj: dict) -> Level:
-    # Old format:
-    # { length_cells: 50, spike_cells: [..] }
-    length_cells = int(obj["length_cells"])
-    if length_cells != 50:
-        raise LevelDecodeError("length_cells must be 50 for now.")
-
-    spike_cells = obj.get("spike_cells", [])
-    if not isinstance(spike_cells, list) or not all(isinstance(x, int) for x in spike_cells):
-        raise LevelDecodeError("spike_cells must be a list of ints.")
-
-    height_cells = 14
-    ground_y = height_cells - 1
-    objects = tuple(LevelObject(kind="spike", x=x, y=ground_y) for x in spike_cells)
-    return Level(length_cells=length_cells, height_cells=height_cells, objects=objects)
