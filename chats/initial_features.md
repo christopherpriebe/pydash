@@ -787,3 +787,303 @@ If you want the spawn to feel more “GD-like” next, the very next tweak is: s
 I think the next step is to create the idea of a "level". That means there is a fixed length level with a certain number of cells. For now, let's restrict the length to always be 50 cells. A level is randomly generated with spikes and then the player tries to play the level. If they win, a new level is generated and they play that.
 
 # Response
+Cool — introducing a Level is the right next abstraction. The key changes are:
+	•	Replace “infinite random spawns” with a finite, pre-generated spike layout.
+	•	Track level progress (how far the level has scrolled) and detect win when the end passes the player.
+	•	On death: restart the same level from the beginning.
+	•	On win: generate a new level and start it.
+
+Below is a clean, minimal implementation that fits your layering rules.
+
+⸻
+
+1) Domain: Level + generation + completion exception
+
+pydash/domain/level.py
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pydash.domain.rng import RandomSource
+
+
+@dataclass(frozen=True)
+class Level:
+    length_cells: int  # fixed at 50 for now
+    spike_cells: tuple[int, ...]  # indices in [0, length_cells-1] where a spike exists
+
+
+def generate_level(rng: RandomSource, *, length_cells: int = 50) -> Level:
+    # Simple random: independent spike per cell with a probability.
+    # Keep early cells empty to avoid immediate unavoidable deaths.
+    spike_prob = 0.18
+    safe_prefix = 3
+
+    spikes: list[int] = []
+    for i in range(length_cells):
+        if i < safe_prefix:
+            continue
+        if rng.random() < spike_prob:
+            spikes.append(i)
+
+    # Optional: ensure at least one spike sometimes (so levels aren't empty)
+    if not spikes and length_cells > safe_prefix + 1 and rng.random() < 0.7:
+        spikes.append(safe_prefix + 1)
+
+    return Level(length_cells=length_cells, spike_cells=tuple(spikes))
+```
+
+pydash/domain/exceptions.py (add)
+
+```python
+class LevelCompleted(Exception):
+    """Raised when the player reaches the end of the level."""
+```
+
+⸻
+
+2) Domain: update GameState to hold the Level and progress
+
+Update pydash/domain/game_state.py (remove the old spawner fields; keep spikes as concrete rects for now):
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass
+from pydash.domain.level import Level
+
+
+@dataclass(frozen=True)
+class Spike:
+    x: float
+    y: float
+    size: float
+
+
+@dataclass(frozen=True)
+class Player:
+    x: float
+    y: float
+    vy: float
+    size: float
+    on_ground: bool
+
+
+@dataclass(frozen=True)
+class GameState:
+    player: Player
+    ground_y: float
+    gravity: float
+    jump_velocity: float
+
+    # Scrolling / grid
+    scroll_speed: float
+    cell_size: float
+
+    # Level
+    level: Level
+    level_start_x: float     # world x where cell 0 begins
+    level_scrolled: float    # how far the level has moved left since start (px)
+
+    # Prebuilt spikes for the current run (world coords, moved each step)
+    spikes: tuple[Spike, ...]
+```
+
+⸻
+
+3) Domain: World steps spikes, checks death, checks win
+
+Update pydash/domain/world.py:
+
+```python
+from __future__ import annotations
+
+from pydash.domain.exceptions import LevelCompleted, PlayerDied
+from pydash.domain.game_state import GameState, Player, Spike
+from pydash.domain.input_state import InputState
+
+
+class World:
+    def step(self, state: GameState, inp: InputState, dt: float) -> GameState:
+        # ---- Player vertical physics ----
+        p = state.player
+        if inp.jump_pressed and p.on_ground:
+            p = Player(x=p.x, y=p.y, vy=state.jump_velocity, size=p.size, on_ground=False)
+
+        vy = p.vy + state.gravity * dt
+        y = p.y + vy * dt
+
+        ground_top = state.ground_y - p.size
+        if y >= ground_top:
+            y = ground_top
+            vy = 0.0
+            on_ground = True
+        else:
+            on_ground = False
+
+        p2 = Player(x=p.x, y=y, vy=vy, size=p.size, on_ground=on_ground)
+
+        # ---- Scroll level left by moving spikes ----
+        dx = state.scroll_speed * dt
+        moved_spikes = tuple(Spike(x=s.x - dx, y=s.y, size=s.size) for s in state.spikes)
+
+        # ---- Progress ----
+        level_scrolled = state.level_scrolled + dx
+
+        # Win when the end of the level passes the player.
+        level_length_px = state.level.length_cells * state.cell_size
+        level_end_x = state.level_start_x + level_length_px
+        # after scrolling, end is at (level_end_x - level_scrolled)
+        if (level_end_x - level_scrolled) <= p2.x:
+            raise LevelCompleted()
+
+        # ---- Collision ----
+        if self._player_hits_any_spike(p2, moved_spikes):
+            raise PlayerDied()
+
+        return GameState(
+            player=p2,
+            ground_y=state.ground_y,
+            gravity=state.gravity,
+            jump_velocity=state.jump_velocity,
+            scroll_speed=state.scroll_speed,
+            cell_size=state.cell_size,
+            level=state.level,
+            level_start_x=state.level_start_x,
+            level_scrolled=level_scrolled,
+            spikes=moved_spikes,
+        )
+
+    def _player_hits_any_spike(self, p: Player, spikes: tuple[Spike, ...]) -> bool:
+        px1, py1 = p.x, p.y
+        px2, py2 = p.x + p.size, p.y + p.size
+        for s in spikes:
+            sx1, sy1 = s.x, s.y
+            sx2, sy2 = s.x + s.size, s.y + s.size
+            if (px1 < sx2 and px2 > sx1 and py1 < sy2 and py2 > sy1):
+                return True
+        return False
+```
+
+⸻
+
+4) App: build state from a Level; restart same level on death, new level on win
+
+Update pydash/app/game_app.py:
+
+```python
+import random
+import tkinter as tk
+
+from pydash.app.game_loop import GameLoop
+from pydash.domain.exceptions import LevelCompleted, PlayerDied
+from pydash.domain.game_state import GameState, Player, Spike
+from pydash.domain.level import Level, generate_level
+from pydash.domain.world import World
+from pydash.ui.input_mapper import TkInputMapper
+from pydash.ui.tk_canvas_view import TkCanvasView
+
+
+class GameApp:
+    def __init__(self) -> None:
+        self.root = tk.Tk()
+        self.root.title("GD Clone (Level Slice)")
+
+        self.view = TkCanvasView(self.root, width=800, height=450)
+        self.input = TkInputMapper(self.root)
+
+        self.world = World()
+        self.rng = random.Random()
+
+        self._fixed_dt = 1.0 / 120.0
+        self._accum = 0.0
+
+        self.level = generate_level(self.rng, length_cells=50)
+        self.state = self._state_from_level(self.level)
+
+        self.loop = GameLoop(
+            root=self.root,
+            render_fn=self._render,
+            update_fn=self._update,
+            fps=60,
+        )
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _state_from_level(self, level: Level) -> GameState:
+        cell = 32.0
+        ground_y = 380.0
+
+        player = Player(x=120.0, y=0.0, vy=0.0, size=cell, on_ground=False)
+
+        # Put the start of the level just off-screen to the right.
+        level_start_x = 820.0
+
+        # Build spike instances in world coords aligned to the grid.
+        spikes: list[Spike] = []
+        for i in level.spike_cells:
+            x = level_start_x + i * cell
+            y = ground_y - cell
+            spikes.append(Spike(x=x, y=y, size=cell))
+
+        return GameState(
+            player=player,
+            ground_y=ground_y,
+            gravity=2000.0,
+            jump_velocity=-700.0,
+            scroll_speed=260.0,
+            cell_size=cell,
+            level=level,
+            level_start_x=level_start_x,
+            level_scrolled=0.0,
+            spikes=tuple(spikes),
+        )
+
+    def run(self) -> None:
+        self.loop.start()
+        self.root.mainloop()
+
+    def _update(self, dt: float) -> None:
+        self._accum += dt
+        inp = self.input.sample()
+
+        max_steps = 5
+        steps = 0
+        while self._accum >= self._fixed_dt and steps < max_steps:
+            try:
+                self.state = self.world.step(self.state, inp, self._fixed_dt)
+            except PlayerDied:
+                # Restart SAME level
+                self.state = self._state_from_level(self.state.level)
+                self._accum = 0.0
+                break
+            except LevelCompleted:
+                # New level
+                self.level = generate_level(self.rng, length_cells=50)
+                self.state = self._state_from_level(self.level)
+                self._accum = 0.0
+                break
+
+            self._accum -= self._fixed_dt
+            steps += 1
+            inp = type(inp)(jump_pressed=False)
+
+    def _render(self) -> None:
+        self.view.render_game(self.state)
+
+    def _on_close(self) -> None:
+        self.loop.stop()
+        self.root.destroy()
+```
+
+Your existing TkCanvasView.render_game(...) spike drawing can stay as-is (it already iterates state.spikes).
+
+⸻
+
+What this gets you
+	•	A finite 50-cell level (spikes are placed on a grid; each spike occupies one cell).
+	•	A clear win condition (“end of level passes player”) and transition to a new randomly generated level.
+	•	A clear death condition that restarts the same level cleanly.
+
+⸻
+
+If you want the next incremental improvement after this: instead of storing spikes as moved world-rectangles, keep spike cells in Level as the source of truth and compute world x from level_scrolled (so resetting doesn’t rebuild lists). That’s a small refactor once this slice is working.
