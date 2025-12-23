@@ -1,46 +1,63 @@
 from __future__ import annotations
 
 from pydash.domain.exceptions import LevelCompleted, PlayerDied
-from pydash.domain.game_state import GameState, Player, Spike
+from pydash.domain.game_state import GameState, Player, Spike, SolidBlock
 from pydash.domain.input_state import InputState
 
 
 class World:
     def step(self, state: GameState, inp: InputState, dt: float) -> GameState:
-        # ---- Player vertical physics ----
+        # ----- Jump -----
         p = state.player
         if inp.jump_pressed and p.on_ground:
             p = Player(x=p.x, y=p.y, vy=state.jump_velocity, size=p.size, on_ground=False)
 
+        # Integrate
         vy = p.vy + state.gravity * dt
         y = p.y + vy * dt
 
-        ground_top = state.ground_y - p.size
-        if y >= ground_top:
-            y = ground_top
+        # ----- Scroll world (move objects left) -----
+        dx = state.scroll_speed * dt
+        spikes = tuple(Spike(x=s.x - dx, y=s.y, size=s.size) for s in state.spikes)
+        solids = tuple(SolidBlock(x=b.x - dx, y=b.y, w=b.w, h=b.h) for b in state.solids)
+
+        level_scrolled = state.level_scrolled + dx
+
+        # ----- Vertical collision: ground + solids -----
+        size = p.size
+        # candidate floor is ground
+        floor_y = state.ground_y - size
+
+        # If falling, allow landing on the top of any solid that overlaps horizontally.
+        # Simple & stable for now: only resolve "from above".
+        if vy >= 0.0:
+            px1, px2 = p.x, p.x + size
+            for b in solids:
+                bx1, bx2 = b.x, b.x + b.w
+                if px1 < bx2 and px2 > bx1:
+                    top = b.y - size
+                    # If player crossed the top this frame (or is slightly inside), snap to top
+                    if y >= top and p.y <= top + 1e-6:
+                        if top < floor_y:
+                            floor_y = top
+
+        if y >= floor_y:
+            y = floor_y
             vy = 0.0
             on_ground = True
         else:
             on_ground = False
 
-        p2 = Player(x=p.x, y=y, vy=vy, size=p.size, on_ground=on_ground)
+        p2 = Player(x=p.x, y=y, vy=vy, size=size, on_ground=on_ground)
 
-        # ---- Scroll level left by moving spikes ----
-        dx = state.scroll_speed * dt
-        moved_spikes = tuple(Spike(x=s.x - dx, y=s.y, size=s.size) for s in state.spikes)
-
-        # ---- Progress ----
-        level_scrolled = state.level_scrolled + dx
-
-        # Win when the end of the level passes the player.
+        # ----- Win condition -----
         level_length_px = state.level.length_cells * state.cell_size
         level_end_x = state.level_start_x + level_length_px
-        # after scrolling, end is at (level_end_x - level_scrolled)
         if (level_end_x - level_scrolled) <= p2.x:
             raise LevelCompleted()
 
-        # ---- Collision ----
-        if self._player_hits_any_spike(p2, moved_spikes):
+        # ----- Hazard collision (AABB vs spike cell) -----
+        if self._player_hits_any_spike(p2, spikes):
             raise PlayerDied()
 
         return GameState(
@@ -53,7 +70,8 @@ class World:
             level=state.level,
             level_start_x=state.level_start_x,
             level_scrolled=level_scrolled,
-            spikes=moved_spikes,
+            spikes=spikes,
+            solids=solids,
         )
 
     def _player_hits_any_spike(self, p: Player, spikes: tuple[Spike, ...]) -> bool:

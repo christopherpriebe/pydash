@@ -30,6 +30,13 @@ class TkCanvasView:
             x3, y3 = s.x + s.size / 2.0, s.y
             self.canvas.create_polygon(x1, y1, x2, y2, x3, y3, fill="#f44", outline="", tags=("spike",))
 
+        self.canvas.delete("solid")
+        for b in state.solids:
+            self.canvas.create_rectangle(
+                b.x, b.y, b.x + b.w, b.y + b.h,
+                fill="#999", outline="", tags=("solid",)
+            )
+
         self.canvas.itemconfigure(
             self._text_id,
             text=f"spikes={len(state.spikes)} y={p.y:.1f} vy={p.vy:.1f}",

@@ -3,7 +3,8 @@ import tkinter as tk
 
 from pydash.app.game_loop import GameLoop
 from pydash.domain.exceptions import LevelCompleted, PlayerDied
-from pydash.domain.game_state import GameState, Player, Spike
+from pydash.domain.level_object import LevelObject
+from pydash.domain.game_state import GameState, Player, Spike, SolidBlock
 from pydash.domain.level import Level, generate_level
 from pydash.domain.world import World
 from pydash.infra.level_repository import LevelRepository
@@ -43,15 +44,25 @@ class GameApp:
     def _state_from_level(self, level: Level) -> GameState:
         cell = 32.0
         ground_y = 380.0
-        player = Player(x=120.0, y=0.0, vy=0.0, size=cell, on_ground=False)
 
+        player = Player(x=120.0, y=0.0, vy=0.0, size=cell, on_ground=False)
         level_start_x = 820.0
 
         spikes: list[Spike] = []
-        for i in level.spike_cells:
-            x = level_start_x + i * cell
-            y = ground_y - cell
-            spikes.append(Spike(x=x, y=y, size=cell))
+        solids: list[SolidBlock] = []
+
+        for obj in level.objects:
+            x_px = level_start_x + obj.x * cell
+            y_px = (ground_y - cell) - (level.height_cells - 1 - obj.y) * cell
+            # Note: obj.y is grid row; we map it so obj.y==height-1 sits on ground.
+
+            if obj.kind == "spike":
+                spikes.append(Spike(x=x_px, y=y_px, size=cell))
+            elif obj.kind == "solid":
+                solids.append(SolidBlock(x=x_px, y=y_px, w=obj.w * cell, h=obj.h * cell))
+            else:
+                # Unknown kinds are ignored by the game for now (but can still be saved/loaded).
+                pass
 
         return GameState(
             player=player,
@@ -64,6 +75,7 @@ class GameApp:
             level_start_x=level_start_x,
             level_scrolled=0.0,
             spikes=tuple(spikes),
+            solids=tuple(solids),
         )
 
     def run(self) -> None:
